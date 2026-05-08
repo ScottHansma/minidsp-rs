@@ -289,6 +289,65 @@ impl MiniDSP<'_> {
         &self.device.dialect
     }
 
+    /// Reads the device's current configuration: master status plus per-channel
+    /// mute and gain for each input and output. The result is shaped like
+    /// [`model::Config`] so it can be re-applied via `POST /devices/{i}/config`.
+    pub async fn get_config(&self) -> Result<model::Config, MiniDSPError> {
+        let master_status: model::MasterStatus = self.get_master_status().await?.into();
+
+        let mut inputs = Vec::with_capacity(self.device.inputs.len());
+        for i in 0..self.device.inputs.len() {
+            let input = self.input(i)?;
+            let (_, gate, _) = input._channel();
+            let mute = if gate.is_some() {
+                Some(input.get_mute().await?)
+            } else {
+                None
+            };
+            let gain = match gate.and_then(|g| g.gain) {
+                Some(_) => Some(input.get_gain().await?),
+                None => None,
+            };
+            inputs.push(model::Input {
+                index: Some(i),
+                gate: model::Gate { mute, gain },
+                peq: vec![],
+                routing: vec![],
+            });
+        }
+
+        let mut outputs = Vec::with_capacity(self.device.outputs.len());
+        for i in 0..self.device.outputs.len() {
+            let output = self.output(i)?;
+            let (_, gate, _) = output._channel();
+            let mute = if gate.is_some() {
+                Some(output.get_mute().await?)
+            } else {
+                None
+            };
+            let gain = match gate.and_then(|g| g.gain) {
+                Some(_) => Some(output.get_gain().await?),
+                None => None,
+            };
+            outputs.push(model::Output {
+                index: Some(i),
+                gate: model::Gate { mute, gain },
+                peq: vec![],
+                invert: None,
+                delay: None,
+                crossover: vec![],
+                compressor: None,
+                fir: None,
+            });
+        }
+
+        Ok(model::Config {
+            master_status: Some(master_status),
+            inputs,
+            outputs,
+        })
+    }
+
     pub(crate) async fn write_dsp_float(&self, addr: u16, value: f32) -> Result<(), MiniDSPError> {
         let dialect = self.dialect();
         let addr = dialect.addr(addr);
@@ -344,6 +403,69 @@ pub trait Channel {
         let gain = gate.gain.ok_or(MiniDSPError::NoSuchPeripheral)?;
 
         dsp.write_dsp_db(gain, value.0).await
+    }
+
+    /// Gets the current mute setting
+    async fn get_mute(&self) -> Result<bool> {
+        let (dsp, gate, _) = self._channel();
+        let gate = gate.ok_or(MiniDSPError::NoSuchPeripheral)?;
+
+        let dialect = dsp.dialect();
+        let response = dsp
+            .client
+            .roundtrip(Commands::Read {
+                addr: dialect.addr(gate.enable),
+                len: 1,
+            })
+            .await?;
+
+        match response {
+            commands::Responses::Read { data, .. } => {
+                let value = data.first().ok_or_else(|| {
+                    MiniDSPError::MalformedResponse("empty Read response for mute".to_string())
+                })?;
+                dialect.decode_mute(value).ok_or_else(|| {
+                    MiniDSPError::MalformedResponse(
+                        "could not decode mute value from Read response".to_string(),
+                    )
+                })
+            }
+            _ => Err(MiniDSPError::MalformedResponse(
+                "unexpected response type for Read".to_string(),
+            )),
+        }
+    }
+
+    /// Gets the current gain setting
+    async fn get_gain(&self) -> Result<Gain> {
+        let (dsp, gate, _) = self._channel();
+        let gate = gate.ok_or(MiniDSPError::NoSuchPeripheral)?;
+        let gain_addr = gate.gain.ok_or(MiniDSPError::NoSuchPeripheral)?;
+
+        let dialect = dsp.dialect();
+        let response = dsp
+            .client
+            .roundtrip(Commands::Read {
+                addr: dialect.addr(gain_addr),
+                len: 1,
+            })
+            .await?;
+
+        match response {
+            commands::Responses::Read { data, .. } => {
+                let value = data.first().ok_or_else(|| {
+                    MiniDSPError::MalformedResponse("empty Read response for gain".to_string())
+                })?;
+                dialect.decode_db(value).map(Gain).ok_or_else(|| {
+                    MiniDSPError::MalformedResponse(
+                        "could not decode gain value from Read response".to_string(),
+                    )
+                })
+            }
+            _ => Err(MiniDSPError::MalformedResponse(
+                "unexpected response type for Read".to_string(),
+            )),
+        }
     }
 
     /// Get an object for configuring the parametric equalizer associated to this channel

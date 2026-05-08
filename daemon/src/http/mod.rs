@@ -333,6 +333,19 @@ async fn post_config(mut req: Request<Body>) -> Result<Response<Body>, Error> {
     Ok(Response::new(Body::default()))
 }
 
+/// Retrieves the current device configuration, including master status and
+/// per-channel mute/gain for each input and output. Returned in the same shape
+/// that `POST /devices/{deviceIndex}/config` accepts.
+async fn get_config(req: Request<Body>) -> Result<Response<Body>, Error> {
+    let device_index: usize = parse_param(&req, "deviceIndex")?;
+    let app = super::APP.get().unwrap();
+    let app = app.read().await;
+    let device = get_device_instance(&app, device_index).await?;
+
+    let config = device.get_config().await?;
+    Ok(serialize_response(&req, config)?)
+}
+
 async fn schema_fn<T: JsonSchema>(req: Request<Body>) -> Result<Response<Body>, Error> {
     use schemars::schema_for;
     Ok(serialize_response(&req, schema_for!(T))?)
@@ -388,8 +401,13 @@ fn router(server: Option<HttpServer>) -> Router<Body, Error> {
             schema_fn::<MasterStatus>,
         )
         .post("/devices/:deviceIndex/config", post_config)
+        .get("/devices/:deviceIndex/config", get_config)
         .get(
             "/devices/:deviceIndex/config/post.schema",
+            schema_fn::<Config>,
+        )
+        .get(
+            "/devices/:deviceIndex/config/get.schema",
             schema_fn::<Config>,
         )
         .get("/api", redoc)

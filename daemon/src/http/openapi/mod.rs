@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use hyper::http::Method;
 use minidsp::{
-    model::{Config, Gate, Input, MasterStatus, Peq, StatusSummary},
+    model::{Config, Gate, Input, MasterStatus, Output, Peq, StatusSummary},
     Biquad, DeviceInfo, Gain, Source,
 };
 use okapi::openapi3::*;
@@ -497,6 +497,65 @@ pub fn schema() -> OpenApi {
                 summary: Some("Apply configuration changes".into()),
                 responses,
                 request_body: Some(request_body.into()),
+                parameters: vec![param],
+                ..Default::default()
+            },
+        });
+    }
+
+    // GET /devices/:deviceIndex/config
+    {
+        let example = Config {
+            master_status: Some(MasterStatus {
+                preset: Some(0),
+                source: Some(Source::Toslink),
+                volume: Some(Gain(-5f32)),
+                mute: Some(false),
+                dirac: Some(false),
+            }),
+            inputs: vec![Input {
+                index: Some(0),
+                gate: Gate {
+                    mute: Some(false),
+                    gain: Some(Gain(0.)),
+                },
+                ..Default::default()
+            }],
+            outputs: vec![Output {
+                index: Some(0),
+                gate: Gate {
+                    mute: Some(false),
+                    gain: Some(Gain(0.)),
+                },
+                ..Default::default()
+            }],
+        };
+        let responses = gen.json_responses::<Config, FormattedError>(Some(example));
+        let param = Parameter {
+            name: "deviceIndex".into(),
+            location: "path".into(),
+            description: None,
+            required: true,
+            deprecated: false,
+            allow_empty_value: false,
+            value: ParameterValue::Schema {
+                style: None,
+                explode: None,
+                allow_reserved: false,
+                schema: Default::default(),
+                example: None,
+                examples: None,
+            },
+            extensions: Default::default(),
+        }
+        .into();
+        gen.add_operation(OperationInfo {
+            path: "/devices/{deviceIndex}/config".to_string(),
+            method: Method::GET,
+            operation: Operation {
+                summary: Some("Get current configuration".into()),
+                responses,
+                request_body: None,
                 parameters: vec![param],
                 ..Default::default()
             },

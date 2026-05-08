@@ -86,4 +86,51 @@ impl Dialect {
             AddrEncoding::AddrLen3 => Value::Int(value as _),
         }
     }
+
+    /// Decodes a mute setting from a `Value` returned by a `Read` command.
+    /// This is the inverse of [`Dialect::mute`].
+    pub fn decode_mute(&self, value: &Value) -> Option<bool> {
+        let bytes = value.clone().into_bytes();
+        if bytes.len() < 4 {
+            return None;
+        }
+        match self.addr_encoding {
+            AddrEncoding::AddrLen3 => {
+                // Encoded as Int LE in the first two bytes: 1 = mute, 2 = unmute
+                let i = u16::from_le_bytes([bytes[0], bytes[1]]);
+                match i {
+                    1 => Some(true),
+                    2 => Some(false),
+                    _ => None,
+                }
+            }
+            AddrEncoding::AddrLen2 => {
+                // Encoded as Int32 BE: 0 = mute, 0x0080_0000 = unmute
+                let v = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                match v {
+                    0 => Some(true),
+                    0x0080_0000 => Some(false),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Decodes a dB gain setting from a `Value` returned by a `Read` command.
+    /// This is the inverse of [`Dialect::db`].
+    pub fn decode_db(&self, value: &Value) -> Option<f32> {
+        let bytes = value.clone().into_bytes();
+        if bytes.len() < 4 {
+            return None;
+        }
+        match self.float_encoding {
+            FloatEncoding::Float32LE => Some(f32::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+            ])),
+            FloatEncoding::FixedPoint => {
+                let v = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                Some(FixedPoint::from_u32(v).to_db())
+            }
+        }
+    }
 }
