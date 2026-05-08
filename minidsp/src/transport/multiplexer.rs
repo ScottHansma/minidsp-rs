@@ -72,18 +72,25 @@ impl Multiplexer {
                 let result = Multiplexer::recv_loop(pending_commands.clone(), recv_send, rx).await;
                 if let Err(e) = result {
                     log::error!("recv loop exit: {e:?}");
+                } else {
+                    log::warn!("recv loop exited without an error");
+                }
 
-                    // Clear any pending commands by propagating the error
+                // Mark the multiplexer as closed *before* draining pending commands.
+                // This ordering is important: any concurrent `roundtrip` call that observes
+                // `event_tx` as Some will hold its lock while enqueueing into pending_command,
+                // so we cannot drain a partial queue. Taking event_tx first prevents new
+                // enqueues, then we drain everything that was already queued.
+                {
+                    let mut tx = receiver_tx.lock().unwrap();
+                    tx.take();
+                }
+                {
                     let mut pending = pending_commands.lock().unwrap();
                     while let Some((_, tx)) = pending.pop_front() {
                         let _ = tx.send(Err(MiniDSPError::TransportClosed));
                     }
-                } else {
-                    log::warn!("recv loop exited without an error");
                 }
-                let mut tx = receiver_tx.lock().unwrap();
-                // Set `receiver_tx` to None to mark this as closed
-                tx.take();
             });
         }
         transport
@@ -102,7 +109,15 @@ impl Multiplexer {
     ) -> impl Future<Output = Result<Responses, MiniDSPError>> {
         let this = self.clone();
         async move {
+            // Hold the event_tx lock across the pending_command enqueue so that the recv-loop
+            // cleanup (which takes event_tx first, then drains pending_command) cannot race
+            // with us. If event_tx is already None, the recv loop has died and any new
+            // command would just hang waiting for a response that will never come.
             let rx = {
+                let event_guard = this.event_tx.lock().unwrap();
+                if event_guard.is_none() {
+                    return Err(MiniDSPError::TransportClosed);
+                }
                 let (tx, rx) = oneshot::channel();
                 let mut pending_command = this.pending_command.lock().unwrap();
                 pending_command.push_back((cmd.clone(), tx));

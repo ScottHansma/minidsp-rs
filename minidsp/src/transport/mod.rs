@@ -111,6 +111,7 @@ impl MiniDSPError {
             }
             MiniDSPError::Timeout => true,
             MiniDSPError::DeviceNotReady => true,
+            MiniDSPError::TransportClosed => true,
             _ => false,
         }
     }
@@ -124,6 +125,7 @@ impl MiniDSPError {
                 }
             }
             MiniDSPError::Timeout => true,
+            MiniDSPError::TransportClosed => true,
             _ => false,
         }
     }

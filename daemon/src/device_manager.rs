@@ -234,6 +234,10 @@ impl Device {
     }
 
     pub async fn shutdown(&self) {
+        // Cap each blocking step so a wedged hidapi call can't hang the whole daemon.
+        // The OwnedJoinHandle::abort() above signals the OS-level recv thread; if hid_read
+        // is mid-call it will eventually drop, but we don't wait around for it.
+        const SHUTDOWN_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
         {
             let mut handles = self.handles.lock().await;
 
@@ -241,19 +245,35 @@ impl Device {
                 handle.abort();
             }
             for handle in handles.drain(..) {
-                if let Err(e) = handle.await {
-                    if !e.is_cancelled() {
+                match tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, handle).await {
+                    Ok(Err(e)) if !e.is_cancelled() => {
                         log::error!("device inner task ended with error: {e}");
                     }
+                    Err(_) => {
+                        log::warn!(
+                            "device inner task did not finish within shutdown timeout; abandoning"
+                        );
+                    }
+                    _ => {}
                 }
             }
 
             let handle = { self.inner.write().unwrap().handle.take() };
             match handle {
                 Some(handle) => {
-                    handle.transport.shutdown().await;
+                    if tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, handle.transport.shutdown())
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("transport shutdown timed out; abandoning");
+                    }
                     let mplex = handle.service.lock().await;
-                    mplex.shutdown().await;
+                    if tokio::time::timeout(SHUTDOWN_STEP_TIMEOUT, mplex.shutdown())
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("multiplexer shutdown timed out; abandoning");
+                    }
                 }
                 None => {
                     log::warn!("shutting down device, but transport was already closed");
@@ -355,22 +375,59 @@ impl Device {
             decoder.set_name_map(device_spec.symbols.iter().copied());
         }
 
+        // Subscribe to multiplexer events before publishing the handle. We don't care about
+        // the events themselves; we only need to detect when the recv loop dies (broadcast
+        // Sender dropped → recv() returns RecvError::Closed). This is the signal that the
+        // device's command path is permanently broken — without it we'd sit in the
+        // transport-EOF loop below indefinitely while every command times out.
+        let mplex_events = {
+            let svc = devhandle.service.lock().await;
+            svc.subscribe().ok()
+        };
+
         {
             let mut inner = inner.write().unwrap();
             inner.handle.replace(devhandle);
         }
 
-        // Keep reading messages until the device returns an error/eof
-        while let Some(frame) = transportlocal.next().await {
-            if let Err(e) = frame {
-                log::warn!("Device at {} closing due to an error: {}", &url, &e);
-                break;
+        // Race transport-level liveness against multiplexer-level liveness; whichever fires
+        // first triggers the removal path so discovery can re-add the device cleanly.
+        let transport_done = async move {
+            while let Some(frame) = transportlocal.next().await {
+                if let Err(e) = frame {
+                    return format!("transport error: {e}");
+                }
             }
-        }
+            "transport EOF".to_string()
+        };
+        let mplex_done = async move {
+            use tokio::sync::broadcast::error::RecvError;
+            match mplex_events {
+                Some(mut rx) => loop {
+                    match rx.recv().await {
+                        Err(RecvError::Closed) => {
+                            return "multiplexer recv loop exited".to_string();
+                        }
+                        // Lagged just means we missed unrelated events; keep watching.
+                        Err(RecvError::Lagged(_)) | Ok(_) => continue,
+                    }
+                },
+                // subscribe() returned Err — recv loop had already died by the time we
+                // got here. Exit immediately so the device is removed and re-added.
+                None => "multiplexer recv loop already dead at startup".to_string(),
+            }
+        };
 
-        log::warn!("Device at {} is closing (EOF)", &url);
+        let exit_reason = tokio::select! {
+            r = transport_done => r,
+            r = mplex_done => r,
+        };
 
-        // Notify the device manager that this device is to be removed
+        log::warn!("Device at {} is closing ({})", &url, exit_reason);
+
+        // Notify the device manager that this device is to be removed. This clears both
+        // inner.devices and inner.registry, so the next discovery tick will re-fire
+        // DiscoveryEvent::Added and create a fresh Device with a fresh transport.
         if let Some(device_manager) = inner.read().unwrap().device_manager.upgrade() {
             let mut device_manager = device_manager.write().unwrap();
             device_manager.remove(&url);
