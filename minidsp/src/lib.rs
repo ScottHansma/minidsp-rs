@@ -405,67 +405,47 @@ pub trait Channel {
         dsp.write_dsp_db(gain, value.0).await
     }
 
-    /// Gets the current mute setting
+    /// Gets the current mute setting.
+    ///
+    /// Uses ReadFloats (0x14) — the same primitive get_input_output_levels
+    /// uses — rather than Commands::Read (0x02), which is unused elsewhere
+    /// in this codebase and was observed to crash the multiplexer with
+    /// ParseError(EmptyPacket) when called against real hardware. Since
+    /// the mute register holds an integer-shaped bit pattern, we read it
+    /// as f32 anyway and inspect to_bits() in the dialect decoder.
     async fn get_mute(&self) -> Result<bool> {
         let (dsp, gate, _) = self._channel();
         let gate = gate.ok_or(MiniDSPError::NoSuchPeripheral)?;
 
-        let dialect = dsp.dialect();
-        let response = dsp
-            .client
-            .roundtrip(Commands::Read {
-                addr: dialect.addr(gate.enable),
-                len: 1,
-            })
-            .await?;
-
-        match response {
-            commands::Responses::Read { data, .. } => {
-                let value = data.first().ok_or_else(|| {
-                    MiniDSPError::MalformedResponse("empty Read response for mute".to_string())
-                })?;
-                dialect.decode_mute(value).ok_or_else(|| {
-                    MiniDSPError::MalformedResponse(
-                        "could not decode mute value from Read response".to_string(),
-                    )
-                })
-            }
-            _ => Err(MiniDSPError::MalformedResponse(
-                "unexpected response type for Read".to_string(),
-            )),
-        }
+        let view = dsp.client.read_floats(gate.enable, 1).await?;
+        let value = *view.data.first().ok_or_else(|| {
+            MiniDSPError::MalformedResponse(
+                "empty FloatData response for mute".to_string(),
+            )
+        })?;
+        dsp.dialect().decode_mute(value).ok_or_else(|| {
+            MiniDSPError::MalformedResponse(format!(
+                "unrecognized mute encoding (bits=0x{:08x})",
+                value.to_bits()
+            ))
+        })
     }
 
-    /// Gets the current gain setting
+    /// Gets the current gain setting.
+    ///
+    /// Uses ReadFloats — see get_mute for the rationale on not using Read.
     async fn get_gain(&self) -> Result<Gain> {
         let (dsp, gate, _) = self._channel();
         let gate = gate.ok_or(MiniDSPError::NoSuchPeripheral)?;
         let gain_addr = gate.gain.ok_or(MiniDSPError::NoSuchPeripheral)?;
 
-        let dialect = dsp.dialect();
-        let response = dsp
-            .client
-            .roundtrip(Commands::Read {
-                addr: dialect.addr(gain_addr),
-                len: 1,
-            })
-            .await?;
-
-        match response {
-            commands::Responses::Read { data, .. } => {
-                let value = data.first().ok_or_else(|| {
-                    MiniDSPError::MalformedResponse("empty Read response for gain".to_string())
-                })?;
-                dialect.decode_db(value).map(Gain).ok_or_else(|| {
-                    MiniDSPError::MalformedResponse(
-                        "could not decode gain value from Read response".to_string(),
-                    )
-                })
-            }
-            _ => Err(MiniDSPError::MalformedResponse(
-                "unexpected response type for Read".to_string(),
-            )),
-        }
+        let view = dsp.client.read_floats(gain_addr, 1).await?;
+        let value = *view.data.first().ok_or_else(|| {
+            MiniDSPError::MalformedResponse(
+                "empty FloatData response for gain".to_string(),
+            )
+        })?;
+        Ok(Gain(dsp.dialect().decode_db(value)))
     }
 
     /// Get an object for configuring the parametric equalizer associated to this channel

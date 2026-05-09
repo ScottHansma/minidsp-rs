@@ -8,3 +8,5 @@ node_modules
 
 .direnv
 result
+.claude/
+build/

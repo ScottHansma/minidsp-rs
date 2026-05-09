@@ -87,49 +87,50 @@ impl Dialect {
         }
     }
 
-    /// Decodes a mute setting from a `Value` returned by a `Read` command.
-    /// This is the inverse of [`Dialect::mute`].
-    pub fn decode_mute(&self, value: &Value) -> Option<bool> {
-        let bytes = value.clone().into_bytes();
-        if bytes.len() < 4 {
-            return None;
-        }
+    /// Decodes a mute setting from an f32 value read via `read_floats`.
+    /// Inverse of [`Dialect::mute`]. The mute register holds an integer-shaped
+    /// bit pattern that, when read as a denormal f32, has a recognizable
+    /// to_bits() value. We compare those.
+    pub fn decode_mute(&self, value: f32) -> Option<bool> {
+        // read_floats parses raw bytes as f32 LE, so to_bits() gives back the
+        // u32 LE-interpreted bit pattern of the original wire bytes.
+        let bits = value.to_bits();
         match self.addr_encoding {
             AddrEncoding::AddrLen3 => {
-                // Encoded as Int LE in the first two bytes: 1 = mute, 2 = unmute
-                let i = u16::from_le_bytes([bytes[0], bytes[1]]);
-                match i {
+                // mute encodes as Value::Int(1)/Int(2). Wire bytes:
+                //   Int(1) -> [0x01, 0x00, 0x00, 0x00] -> LE bits 0x00000001
+                //   Int(2) -> [0x02, 0x00, 0x00, 0x00] -> LE bits 0x00000002
+                match bits {
                     1 => Some(true),
                     2 => Some(false),
                     _ => None,
                 }
             }
             AddrEncoding::AddrLen2 => {
-                // Encoded as Int32 BE: 0 = mute, 0x0080_0000 = unmute
-                let v = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                match v {
+                // mute encodes as Value::Int32(0) / Int32(0x0080_0000), written
+                // BE. So wire bytes:
+                //   0          -> [0,0,0,0]       -> LE bits 0x00000000
+                //   0x00800000 -> [0,0x80,0,0]    -> LE bits 0x00008000
+                match bits {
                     0 => Some(true),
-                    0x0080_0000 => Some(false),
+                    0x0000_8000 => Some(false),
                     _ => None,
                 }
             }
         }
     }
 
-    /// Decodes a dB gain setting from a `Value` returned by a `Read` command.
-    /// This is the inverse of [`Dialect::db`].
-    pub fn decode_db(&self, value: &Value) -> Option<f32> {
-        let bytes = value.clone().into_bytes();
-        if bytes.len() < 4 {
-            return None;
-        }
+    /// Decodes a dB gain reading from an f32 returned by `read_floats`.
+    /// Inverse of [`Dialect::db`]. For Float32LE devices the f32 is already
+    /// the dB value. For FixedPoint devices the bytes were written BE but
+    /// read_floats parses them LE, so we byte-swap to recover the original
+    /// FixedPoint u32 and convert to dB through it.
+    pub fn decode_db(&self, value: f32) -> f32 {
         match self.float_encoding {
-            FloatEncoding::Float32LE => Some(f32::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-            ])),
+            FloatEncoding::Float32LE => value,
             FloatEncoding::FixedPoint => {
-                let v = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                Some(FixedPoint::from_u32(v).to_db())
+                let be_bits = value.to_bits().swap_bytes();
+                FixedPoint::from_u32(be_bits).to_db()
             }
         }
     }
