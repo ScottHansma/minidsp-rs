@@ -84,6 +84,13 @@ impl HidStream {
         tx: mpsc::UnboundedSender<Result<Bytes, HidError>>,
     ) {
         thread::spawn(move || {
+            // After this many consecutive read errors we treat the device as
+            // gone and terminate the loop. On USB unplug, hid_read returns
+            // errors immediately and continuously; without termination this
+            // thread would spin at ~10k errors/sec.
+            const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+            let mut consecutive_errors: u32 = 0;
+
             loop {
                 if tx.is_closed() {
                     return Ok::<(), TrySendError<_>>(());
@@ -97,9 +104,13 @@ impl HidStream {
                 let size = device.read_timeout(&mut read_buf, 500);
                 match size {
                     // read_timeout returns Ok(0) if a timeout has occurred
-                    Ok(0) => continue,
+                    Ok(0) => {
+                        consecutive_errors = 0;
+                        continue;
+                    }
                     Ok(size) => {
                         // successful read
+                        consecutive_errors = 0;
                         read_buf.truncate(size);
                         log::trace!("read: {:02x?}", read_buf.as_ref());
                         tx.unbounded_send(Ok(read_buf.freeze()))?;
@@ -107,7 +118,22 @@ impl HidStream {
                     Err(e) => {
                         // device error
                         log::error!("error in hid receive loop: {e:?}");
+                        consecutive_errors += 1;
+                        let last = consecutive_errors >= MAX_CONSECUTIVE_ERRORS;
                         tx.unbounded_send(Err(e))?;
+                        if last {
+                            // Device is gone or persistently failing. Drop tx
+                            // so the multiplexer's stream sees end-of-stream
+                            // and tears down; standby-recovery / discovery
+                            // then re-adds the device fresh on next tick.
+                            log::warn!(
+                                "hid receive loop: {MAX_CONSECUTIVE_ERRORS} consecutive errors, exiting"
+                            );
+                            return Ok::<(), TrySendError<_>>(());
+                        }
+                        // Brief sleep so we don't spin if errors are returning
+                        // instantly (which they do on USB unplug).
+                        thread::sleep(time::Duration::from_millis(100));
                     }
                 }
             }
