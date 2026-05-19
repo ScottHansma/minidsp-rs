@@ -360,18 +360,23 @@ async fn redoc(_: Request<Body>) -> Result<Response<Body>, Error> {
 // Define an error handler function which will accept the `routerify::Error`
 // and the request information and generates an appropriate response.
 async fn error_handler(err: routerify::RouteError) -> Response<Body> {
-    let error = if let Some(err) = err.downcast_ref::<Error>() {
+    let (body, content_type) = if let Some(err) = err.downcast_ref::<Error>() {
         let err: FormattedError = err.clone().into();
-        serde_json::to_string_pretty(&err).unwrap_or_else(|e| {
-            format!("the error: '{err:?}' couldn't be serialized as json: {e:?}")
-        })
+        match serde_json::to_string_pretty(&err) {
+            Ok(json) => (json, "application/json"),
+            Err(e) => (
+                format!("the error: '{err:?}' couldn't be serialized as json: {e:?}"),
+                "text/plain",
+            ),
+        }
     } else {
-        format!("Something went wrong: {err}")
+        (format!("Something went wrong: {err}"), "text/plain")
     };
 
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::from(error))
+        .header("Content-Type", content_type)
+        .body(Body::from(body))
         .unwrap()
 }
 
