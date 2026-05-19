@@ -163,10 +163,13 @@ impl MiniDSP<'_> {
             .iter()
             .filter_map(|idx| idx.meter)
             .collect();
-        let mut levels = self
-            .client
-            .read_floats_multi(inputs.iter().copied().chain(outputs.iter().copied()))
-            .await?;
+        let addrs: Vec<_> = inputs.iter().copied().chain(outputs.iter().copied()).collect();
+        let mut levels = self.client.read_floats_multi(addrs.iter().copied()).await?;
+
+        // HTx stops computing meters when idle; first read returns -120.0 placeholder across all channels, next read is live.
+        if !levels.is_empty() && levels.iter().all(|&v| v == -120.0) {
+            levels = self.client.read_floats_multi(addrs.iter().copied()).await?;
+        }
 
         let outputs = Vec::from(&levels[inputs.len()..levels.len()]);
         levels.truncate(self.device.inputs.len());
