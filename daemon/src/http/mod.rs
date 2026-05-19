@@ -157,15 +157,28 @@ async fn get_master_status(req: Request<Body>) -> Result<Response<Body>, Error> 
                                 // If we are already querying for levels, skip this interval.
                                 let device = device.try_lock().ok()?;
 
-                                let (input_levels, output_levels) =
-                                    device.get_input_output_levels().await.ok()?;
-                                let summary = StatusSummary {
-                                    input_levels,
-                                    output_levels,
-                                    ..Default::default()
-                                };
-                                let s = serde_json::to_string(&summary).unwrap();
-                                Some(Ok::<_, tungstenite::Error>(Message::Text(s)))
+                                match device.get_input_output_levels().await {
+                                    Ok((input_levels, output_levels)) => {
+                                        let summary = StatusSummary {
+                                            input_levels,
+                                            output_levels,
+                                            ..Default::default()
+                                        };
+                                        let s = serde_json::to_string(&summary).unwrap();
+                                        Some(Ok::<_, tungstenite::Error>(Message::Text(s)))
+                                    }
+                                    Err(e) => {
+                                        // Device handle is dead (e.g. USB unplug cleared
+                                        // the registry behind us). Yield an Err so forward()
+                                        // tears down the WS; the client reconnects and gets
+                                        // a fresh device handle from get_device_instance.
+                                        log::debug!(
+                                            "ws levels read failed: {:?}; closing ws",
+                                            e
+                                        );
+                                        Some(Err(tungstenite::Error::ConnectionClosed))
+                                    }
+                                }
                             }
                         })
                         .boxed()
@@ -188,7 +201,16 @@ async fn get_master_status(req: Request<Body>) -> Result<Response<Body>, Error> 
                             async move {
                                 // If we are already waiting for a response, skip this interval.
                                 let device = device.try_lock().ok()?;
-                                let status = device.get_master_status().await.ok()?;
+                                let status = match device.get_master_status().await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        log::debug!(
+                                            "ws poll read failed: {:?}; closing ws",
+                                            e
+                                        );
+                                        return Some(Err(tungstenite::Error::ConnectionClosed));
+                                    }
+                                };
                                 let summary = StatusSummary {
                                     master: status.into(),
                                     ..Default::default()
