@@ -126,7 +126,15 @@ impl Multiplexer {
 
             let mut writer = this.write.lock().await;
             log::trace!("send: {:02x?}", &cmd);
-            writer.send(cmd).await?;
+            if let Err(e) = writer.send(cmd).await {
+                // The sink is now in an errored state. futures' SinkErrInto/MapErr
+                // adapter panics if polled again after error completion, so we must
+                // ensure no further callers try to send through it. Clear event_tx
+                // (synchronously, before dropping the writer guard) so the recv-loop-
+                // death check at the top of roundtrip trips for subsequent callers.
+                this.event_tx.lock().unwrap().take();
+                return Err(e);
+            }
 
             rx.await.map_err(|_| MiniDSPError::TransportClosed)?
         }
@@ -213,10 +221,17 @@ impl std::ops::Deref for MultiplexerService {
 
 impl MultiplexerService {
     pub async fn shutdown(&self) {
+        // If event_tx is already None the transport's recv loop has died and
+        // the underlying sink may be in an errored state — calling close()
+        // on it would panic in futures' SinkErrInto adapter. Just leave it.
+        if self.event_tx.lock().unwrap().is_none() {
+            return;
+        }
         let mut write = self.write.lock().await;
         if let Err(e) = write.close().await {
             log::error!("error shutting down multiplexer service: {e}");
         }
+        self.event_tx.lock().unwrap().take();
     }
 }
 
