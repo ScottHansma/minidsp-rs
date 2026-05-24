@@ -152,8 +152,15 @@ fn response_matches_pending(
     matches
 }
 
-pub fn start_advertise(app: &App, cfg: Arc<config::TcpServer>) -> Result<(), anyhow::Error> {
-    for srv in &app.config.tcp_servers {
+pub fn start_advertise(_app: &App, cfg: Arc<config::TcpServer>) -> Result<(), anyhow::Error> {
+    // Process only THIS tcp_server's advertise block (one call per [[tcp_server]]).
+    // The previous code looped over `app.config.tcp_servers` but used the outer
+    // `cfg` for device_matches() — with multiple tcp_servers each main() spawned
+    // an advertiser per other tcp_server while always carrying the outer cfg's
+    // device data. Result: crossed identities in broadcasts that confused
+    // Device Console (entries flickered, devices showed blank / "no presets").
+    {
+        let srv = cfg.as_ref();
         if let Some(ref advertise) = srv.advertise {
             let ip_address = Ipv4Addr::from_str(&advertise.ip)?;
             let hostname: Arc<str> = Arc::from(advertise.name.clone());
