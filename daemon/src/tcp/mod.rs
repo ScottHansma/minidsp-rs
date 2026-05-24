@@ -164,8 +164,11 @@ pub fn start_advertise(app: &App, cfg: Arc<config::TcpServer>) -> Result<(), any
                 let device_info = device.device_info()?;
 
                 let mut packet = discovery::DiscoveryPacket {
-                    // The mac address is used to distinguish between devices on the *device list* page in the MiniDSP Device Console app
-                    mac_address: [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00],
+                    // The mac address is used to distinguish between devices on the *device list* page in the MiniDSP Device Console app.
+                    // First octet 0x02 = locally-administered unicast (clears the broadcast/multicast bit that 0xFF would set).
+                    // The Device Console and mobile apps reject packets whose source MAC has the multicast bit set; using 0xFF
+                    // there made the daemon's broadcasts invisible.
+                    mac_address: [0x02, 0xFF, 0x00, 0x00, 0x00, 0x00],
                     ip_address,
                     hwid: device_info.hw_id,
                     dsp_id: device_info.dsp_version,
