@@ -50,8 +50,14 @@ impl DiscoveryPacket {
     }
 
     pub fn to_bytes(&self) -> Bytes {
-        let mut p = BytesMut::with_capacity(64);
-        p.put_slice(&[0x80, 0x0, 0x05, 0xA0]);
+        let mut p = BytesMut::with_capacity(96);
+        // byte[1]=0x12 matches what real miniDSP hardware sends per the
+        // captured-wire test fixtures further down in this file. The daemon
+        // used to send 0x00 (after #576's reverse-engineering of the Wi-DG's
+        // Alexa client, which only validates bytes 0/2/3) but Device Console
+        // and the iOS/Android apps appear to validate more strictly, and
+        // ignored daemon broadcasts entirely until this byte matched.
+        p.put_slice(&[0x80, 0x12, 0x05, 0xA0]);
         p.resize(35, 0);
         self.mac_address.as_ref().copy_to_slice(&mut p[6..12]);
         self.ip_address
@@ -64,11 +70,24 @@ impl DiscoveryPacket {
         p[21] = self.dsp_id;
         p[22] = (self.sn >> 8) as u8;
         p[23] = (self.sn & 0xFF) as u8;
+        // byte[30]=0xac appears in every captured real-device packet (see the
+        // test_parse fixtures below). Semantics unknown — possibly a
+        // packet-type / version flag — but matching it costs nothing.
+        p[30] = 0xac;
         if self.hostname.len() > u8::MAX as usize {
             panic!("hostname was above max length")
         }
         p.put_u8(self.hostname.len() as u8);
         p.put_slice(self.hostname.as_bytes());
+        // Trailing 28-byte constant suffix taken verbatim from captured
+        // real-device packets. It's identical across three different devices
+        // in the test fixtures (different IPs, different serials), so it's
+        // not a device-specific HMAC — likely a constant the apps look for.
+        p.put_slice(&[
+            0xfc, 0xa1, 0x51, 0x98, 0x43, 0x69, 0xaa, 0x6c, 0x76, 0xac, 0xba, 0xaf,
+            0x37, 0x83, 0xbe, 0x61, 0xf5, 0x69, 0xd0, 0x98, 0x1c, 0xe0, 0x95, 0xf2,
+            0x6b, 0x81, 0xd8, 0x60,
+        ]);
         p.freeze()
     }
 }
