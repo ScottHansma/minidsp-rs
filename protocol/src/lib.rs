@@ -59,7 +59,7 @@ impl DeviceInfo {
     }
 
     pub fn supports_dirac(&self) -> bool {
-        matches!(self.dsp_version, 61 | 94 | 95 | 101 | 105)
+        matches!(self.dsp_version, 61 | 94 | 95 | 101 | 105 | 115)
     }
 }
 
