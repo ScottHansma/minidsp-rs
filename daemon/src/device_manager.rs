@@ -477,13 +477,11 @@ pub struct DeviceHandle {
 
 impl DeviceHandle {
     pub fn to_minidsp(&self) -> Result<MiniDSP<'static>, MiniDSPError> {
+        // Bail rather than block_on(get_device_info()): the previous synchronous
+        // re-probe pinned a tokio worker per HTTP call against an unresponsive
+        // device, eventually starving the runtime and silencing healthy siblings.
+        let device_info = self.device_info.ok_or(MiniDSPError::DeviceNotReady)?;
         let client = Client::new(self.service.clone());
-
-        let device_info = match self.device_info {
-            Some(x) => x,
-            None => futures::executor::block_on(client.get_device_info())?,
-        };
-
         let spec = self.device_spec.unwrap_or_else(|| probe(&device_info));
         let dsp = MiniDSP::from_client(client, spec, device_info);
         Ok(dsp)
